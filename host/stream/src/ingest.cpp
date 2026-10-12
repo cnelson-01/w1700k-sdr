@@ -11,6 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <fcntl.h>
+#endif
+
 namespace {
 
 // struct w1700k_sdr_export_header: le32 magic "SDR1", le16 offset, le16 slice_bytes, le64 seq.
@@ -115,10 +119,21 @@ void Ingest::start()
         auto w = std::make_unique<Worker>();
         int one = 1, rcvbuf = 48 << 20;
         timeval tick{0, 100000};
+#ifdef __APPLE__
+        // No SOCK_CLOEXEC or SO_RXQ_OVFL; SO_RCVBUF is capped by kern.ipc.maxsockbuf, so step
+        // down from the request until the kernel accepts one.
+        w->fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (w->fd >= 0) fcntl(w->fd, F_SETFD, FD_CLOEXEC);
+        while (w->fd >= 0 && rcvbuf > (1 << 20) &&
+               setsockopt(w->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)))
+            rcvbuf -= 1 << 20;
+        if (w->fd < 0 || setsockopt(w->fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) ||
+#else
         w->fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);  // not inherited by the controller
         if (w->fd < 0 || setsockopt(w->fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) ||
             setsockopt(w->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) ||
             setsockopt(w->fd, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one)) ||
+#endif
             setsockopt(w->fd, SOL_SOCKET, SO_RCVTIMEO, &tick, sizeof(tick)) ||
             bind(w->fd, reinterpret_cast<sockaddr *>(&address), sizeof(address))) {
             std::string why = std::strerror(errno);
@@ -139,6 +154,28 @@ Ingest::~Ingest()
     }
 }
 
+#ifdef __APPLE__
+// No recvmmsg: the first recvmsg waits (up to SO_RCVTIMEO), the rest of the batch takes only
+// what is already queued, as MSG_WAITFORONE does. Drops are not reported (no SO_RXQ_OVFL);
+// they still show as lost slices.
+void Ingest::work(Worker &w)
+{
+    while (!stopping_.load(std::memory_order_relaxed)) {
+        ssize_t lens[kBatch];
+        unsigned n = 0;
+        while (n < kBatch) {
+            ssize_t r = recv(w.fd, &w.buffers[n * kDatagram], kDatagram, n ? MSG_DONTWAIT : 0);
+            if (r < 0) break;
+            lens[n++] = r;
+        }
+        if (!n) continue;
+        uint64_t t = now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
+        bool fresh = previous && int64_t(t - previous) > int64_t(kRunGapNs);
+        for (unsigned k = 0; k < n; ++k)
+            take(w, &w.buffers[k * kDatagram], size_t(lens[k]), fresh && k == 0, t);
+    }
+}
+#else
 void Ingest::work(Worker &w)
 {
     mmsghdr msgs[kBatch];
@@ -170,6 +207,8 @@ void Ingest::work(Worker &w)
         }
     }
 }
+
+#endif
 
 // Firmware events are filed as event slots rather than dropped: the scheduler steps over them
 // without counting a loss, and the samples either side stay contiguous. A completion the unit

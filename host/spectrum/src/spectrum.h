@@ -94,8 +94,16 @@ public:
 
 private:
     struct Transform;
-    struct Job;
     struct Worker;
+    // Defined here, not in spectrum.cpp: std::deque needs a complete element type.
+    struct Job {
+        std::shared_ptr<const StreamView> view;  // the mapping the run lives in
+        uint64_t sequence = 0, run = 0, first = 0, stride = 0;
+        unsigned blocks = 0;
+        std::shared_ptr<const Transform> transform;
+        Tuning tuning;
+        bool peak = false, remove_dc = false;
+    };
     // A tuning and the slot it applies from (ordered by run, then slot index).
     struct Segment {
         uint64_t run = 0, from = 0;

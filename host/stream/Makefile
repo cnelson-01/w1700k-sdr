@@ -6,7 +6,15 @@ CXXFLAGS ?= -O3
 WARNINGS ?= -Wall -Wextra -Werror
 PREFIX ?= /usr/local
 override CXXFLAGS += -std=c++17 -pthread -Iinclude $(WARNINGS)
-LDLIBS += -pthread -lfftw3f -lrt
+LDLIBS += -pthread -lfftw3f
+ifeq ($(shell uname -s),Darwin)
+# macOS: no librt (shm_open is in libSystem); FFTW and zlib from Homebrew.
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
+override CXXFLAGS += -I$(BREW_PREFIX)/include
+override LDFLAGS += -L$(BREW_PREFIX)/lib
+else
+LDLIBS += -lrt
+endif
 
 SOURCES := $(wildcard src/*.cpp)
 OBJECTS := $(patsubst src/%.cpp,build/%.o,$(SOURCES))

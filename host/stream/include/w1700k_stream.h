@@ -140,7 +140,7 @@ static inline int w1700k_stream_alive(const struct w1700k_stream_header *h)
  * Maps the service's shared memory (name NULL: W1700K_STREAM_NAME); `writable` for a consumer that
  * writes the control words. Returns NULL with errno set: ENOENT while no service has created it,
  * EPROTO for another layout. *bytes receives the mapping's length (for munmap), *inode the
- * object's inode (a restarted service creates a new one).
+ * object's inode (a restarted service creates a new one; on macOS, the service's pid instead).
  */
 static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, int writable, size_t *bytes,
 							      uint64_t *inode)
@@ -162,14 +162,25 @@ static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, 
 	if (h == MAP_FAILED)
 		return NULL;
 	if (h->magic != W1700K_STREAM_MAGIC || h->version != W1700K_STREAM_VERSION ||
-	    h->slice_samples != W1700K_STREAM_SLICE || h->total_bytes != (uint64_t)st.st_size) {
+	    h->slice_samples != W1700K_STREAM_SLICE ||
+#ifdef __APPLE__
+	    /* macOS rounds the object up to whole pages. */
+	    h->total_bytes > (uint64_t)st.st_size || (uint64_t)st.st_size - h->total_bytes >= 65536) {
+#else
+	    h->total_bytes != (uint64_t)st.st_size) {
+#endif
 		munmap(h, (size_t)st.st_size);
 		errno = EPROTO;
 		return NULL;
 	}
 	*bytes = (size_t)st.st_size;
 	if (inode)
+#ifdef __APPLE__
+		/* Every macOS shared-memory object has inode 0: the service's pid tells them apart. */
+		*inode = h->service_pid;
+#else
 		*inode = (uint64_t)st.st_ino;
+#endif
 	return h;
 }
 

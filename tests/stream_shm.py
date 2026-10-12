@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MIT
 """Test helper: w1700k-stream's shared memory (host/stream/include/w1700k_stream.h) from Python."""
+import ctypes
 import mmap
 import os
 import struct
+import sys
 
 SLICE = 2048
 TAG_EVENT, TAG_LOST, TAG_FLAT = 1 << 63, 1 << 62, 1 << 61
@@ -20,13 +22,41 @@ FIELDS = {
 }
 
 
+def _open(name, writable):
+    """A descriptor for the object: a file under /dev/shm on Linux; macOS has only shm_open."""
+    if sys.platform != "darwin":
+        return os.open("/dev/shm/" + name.lstrip("/"), os.O_RDWR if writable else os.O_RDONLY)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int]  # no O_CREAT, so no mode argument
+    fd = libc.shm_open(("/" + name.lstrip("/")).encode(), os.O_RDWR if writable else os.O_RDONLY)
+    if fd < 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e), name)
+    return fd
+
+
+def exists(name):
+    try:
+        os.close(_open(name, False))
+    except OSError:
+        return False
+    return True
+
+
 def ready(name):
     """The service has published its object and receives."""
     try:
-        with open("/dev/shm/" + name.lstrip("/"), "rb") as f:
-            head = f.read(16)
+        fd = _open(name, False)
     except OSError:
         return False
+    try:
+        size = os.fstat(fd).st_size
+        if size < 16:
+            return False
+        with mmap.mmap(fd, 16, prot=mmap.PROT_READ) as m:
+            head = m[:16]
+    finally:
+        os.close(fd)
     return len(head) == 16 and struct.unpack("<4I", head)[:2] == (0x4D525453, 1)
 
 
@@ -36,9 +66,11 @@ def tag(run, index):
 
 class Shm:
     def __init__(self, name):
-        path = "/dev/shm/" + name.lstrip("/")
-        with open(path, "r+b") as f:
-            self.map = mmap.mmap(f.fileno(), 0)
+        fd = _open(name, True)
+        try:
+            self.map = mmap.mmap(fd, os.fstat(fd).st_size)
+        finally:
+            os.close(fd)
         magic, version, _, slice_samples = struct.unpack_from("<4I", self.map, 0)
         assert (magic, version, slice_samples) == (0x4D525453, 1, SLICE), "not a w1700k-stream object"
 

@@ -33,6 +33,14 @@ std::string describe(int status)
 ChildProcess::ChildProcess(const std::string &command, std::function<void()> wake) : wake_(std::move(wake))
 {
     int in[2], out[2];
+#ifdef __APPLE__
+    // No pipe2: set close-on-exec after the fact (the window only matters to a concurrent fork).
+    auto pipe2 = [](int fds[2], int flags) {
+        if (pipe(fds)) return -1;
+        if (flags & O_CLOEXEC) fcntl(fds[0], F_SETFD, FD_CLOEXEC), fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+        return 0;
+    };
+#endif
     if (pipe2(in, O_CLOEXEC)) throw std::runtime_error(std::string("pipe: ") + std::strerror(errno));
     if (pipe2(out, O_CLOEXEC)) {
         int e = errno;

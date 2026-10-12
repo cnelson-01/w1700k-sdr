@@ -122,7 +122,7 @@ class StreamServiceTest(unittest.TestCase):
         self.proc.send_signal(signal.SIGINT)
         self.assertEqual(self.proc.wait(10), 0)
         self.proc.stderr.close()
-        self.assertFalse(os.path.exists("/dev/shm" + self.name), "the object is unlinked at exit")
+        self.assertFalse(stream_shm.exists(self.name), "the object is unlinked at exit")
 
     def send(self, seq, payload):
         self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))

@@ -15,8 +15,12 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#ifdef __APPLE__
+#include "epoll_kqueue.h"
+#else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -215,8 +219,14 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
     if (int error = getaddrinfo(host.c_str(), port.c_str(), &hints, &found))
         throw std::runtime_error("cannot listen on " + listen + ": " + gai_strerror(error));
     for (addrinfo *a = found; a && listener_ < 0; a = a->ai_next) {
+#ifdef __APPLE__
+        int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (fd < 0) continue;
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+#else
         int fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
         if (fd < 0) continue;
+#endif
         int yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
         if (bind(fd, a->ai_addr, a->ai_addrlen) == 0 && ::listen(fd, 64) == 0) {
@@ -250,14 +260,22 @@ WebServer::~WebServer()
 {
     connections_.clear();
     if (listener_ >= 0) ::close(listener_);
+#ifdef __APPLE__
+    if (event_ >= 0) eventfd_close(event_);
+#else
     if (event_ >= 0) ::close(event_);
+#endif
     if (epoll_ >= 0) ::close(epoll_);
 }
 
 void WebServer::wake()
 {
+#ifdef __APPLE__
+    if (eventfd_signal(event_) < 0) {
+#else
     uint64_t one = 1;
     if (write(event_, &one, sizeof(one)) < 0) {
+#endif
         // The counter is saturated only if nobody reads it; nothing to do.
     }
 }

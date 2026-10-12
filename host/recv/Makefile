@@ -5,7 +5,9 @@ CFLAGS ?= -O2
 WARNINGS ?= -Wall -Wextra -Werror
 PREFIX ?= /usr/local
 override CFLAGS += -std=c11 -I../stream/include $(WARNINGS)
+ifneq ($(shell uname -s),Darwin)
 LDLIBS += -lrt
+endif
 
 .PHONY: all clean install
 all: build/sdr-recv
