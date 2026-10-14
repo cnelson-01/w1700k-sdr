@@ -24,6 +24,11 @@ ROOTFS = IMAGES / 'rootfs.squashfs'
 DURABLE = IMAGES / 'durable.ubifs'
 # unsquashfs and mksquashfs, built by Buildroot, make the per-unit root.
 SQUASHFS_TOOLS = ROOT / 'platform/build/buildroot/host/bin'
+if sys.platform == 'darwin' and not SQUASHFS_TOOLS.exists():
+    # The images were built in a container (docker/build-images.sh): Homebrew's squashfs instead.
+    import shutil
+    if shutil.which('mksquashfs'):
+        SQUASHFS_TOOLS = Path(shutil.which('mksquashfs')).parent
 
 CONFIG_FILE = Path(os.environ.get('XDG_CONFIG_HOME', '~/.config')).expanduser() / \
     'w1700k/install.json'

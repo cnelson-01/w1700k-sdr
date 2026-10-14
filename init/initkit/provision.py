@@ -19,6 +19,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 
 from . import config
@@ -32,6 +33,8 @@ IMAGE = 'rootfs.squashfs'
 MKSQUASHFS_OPTIONS = ['-noappend', '-processors', '1', '-b', '128K', '-comp', 'zstd',
                       '-Xcompression-level', '22', '-all-root', '-repro-time', '0',
                       '-no-progress', '-exit-on-error']
+if sys.platform == 'darwin':
+    MKSQUASHFS_OPTIONS.append('-no-xattrs')  # macOS tags every file it writes (com.apple.provenance)
 KEY_TYPES = (b'ssh-ed25519', b'ecdsa-sha2-nistp256', b'ecdsa-sha2-nistp384',
              b'ecdsa-sha2-nistp521', b'ssh-rsa')
 
@@ -170,6 +173,22 @@ def _write(tree, name, data, mode):
         parent.chmod(saved)
 
 
+def _restore_special_bits(unsquashfs, generic, tree):
+    """Put back setuid, setgid and sticky bits an unprivileged unsquashfs left off (macOS)."""
+    listing = subprocess.run([str(unsquashfs), '-lln', '-d', '', str(generic)], check=True,
+                             capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        fields = line.split(None, 5)
+        if len(fields) < 6 or fields[0][0] not in '-d':
+            continue
+        perms, name = fields[0], fields[5]
+        special = ((0o4000 if perms[3] in 'sS' else 0) | (0o2000 if perms[6] in 'sS' else 0) |
+                   (0o1000 if perms[9] in 'tT' else 0))
+        path = tree / name.lstrip('/')
+        if special and path.exists() and not path.is_symlink():
+            path.chmod(path.stat().st_mode & 0o7777 | special)
+
+
 def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
           tools=config.SQUASHFS_TOOLS):
     """Write the unit's rootfs.squashfs into its directory and return the path."""
@@ -183,6 +202,7 @@ def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
         tree = Path(temporary) / 'root'
         subprocess.run([str(unsquashfs), '-no-xattrs', '-quiet', '-no-progress', '-d',
                         str(tree), str(generic)], check=True, stdout=subprocess.DEVNULL)
+        _restore_special_bits(unsquashfs, generic, tree)
         # The generic root links /etc/dropbear to a RAM directory for per-boot keys.
         dropbear = tree / 'etc/dropbear'
         if dropbear.is_symlink():

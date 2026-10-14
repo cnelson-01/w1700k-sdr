@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import socket
 import subprocess
+import sys
 import termios
 
 from . import tftp, uart
@@ -22,6 +23,14 @@ class Session:
 
 def local_interface(address):
     """The host interface holding `address`, or None."""
+    if sys.platform == 'darwin':
+        interface = None
+        for line in subprocess.run(['ifconfig'], capture_output=True, text=True).stdout.splitlines():
+            if line and not line[0].isspace():
+                interface = line.split(':')[0]
+            elif line.split()[:2] == ['inet', address]:
+                return interface
+        return None
     listing = subprocess.run(['ip', '-brief', 'address'], capture_output=True,
                              text=True).stdout
     for line in listing.splitlines():
