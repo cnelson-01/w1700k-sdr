@@ -12,7 +12,28 @@
 #include <unistd.h>
 
 #ifdef __APPLE__
+#include <cerrno>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sys/qos.h>
+#include <sys/uio.h>
+
+// recvmsg_x: XNU's batch receive (bsd/sys/socket_private.h), in libSystem since macOS 10.11 and
+// used by Chromium's QUIC; not in the public SDK headers. It returns how many datagrams it filled,
+// each one's length in msg_datalen.
+extern "C" {
+struct msghdr_x {
+    void *msg_name;
+    socklen_t msg_namelen;
+    struct iovec *msg_iov;
+    int msg_iovlen;
+    void *msg_control;
+    socklen_t msg_controllen;
+    int msg_flags;
+    size_t msg_datalen;
+};
+ssize_t recvmsg_x(int s, const struct msghdr_x *msgp, unsigned int cnt, int flags);
+}
 #endif
 
 namespace {
@@ -117,6 +138,17 @@ void Ingest::start()
     inet_pton(AF_INET, bind_ip_.c_str(), &address.sin_addr);
     for (unsigned i = 0; i < threads_; ++i) {
         auto w = std::make_unique<Worker>();
+#ifdef __APPLE__
+        // macOS gives each datagram to one of the SO_REUSEPORT sockets only, so the other
+        // threads would sit idle: they all read the first socket instead.
+        if (i) {
+            w->fd = dup(workers_[0]->fd);
+            if (w->fd < 0) throw std::runtime_error(std::string("dup: ") + std::strerror(errno));
+            fcntl(w->fd, F_SETFD, FD_CLOEXEC);
+            workers_.push_back(std::move(w));
+            continue;
+        }
+#endif
         int one = 1, rcvbuf = 48 << 20;
         timeval tick{0, 100000};
 #ifdef __APPLE__
@@ -155,24 +187,46 @@ Ingest::~Ingest()
 }
 
 #ifdef __APPLE__
-// No recvmmsg: the first recvmsg waits (up to SO_RCVTIMEO), the rest of the batch takes only
-// what is already queued, as MSG_WAITFORONE does. Drops are not reported (no SO_RXQ_OVFL);
-// they still show as lost slices.
+// No recvmmsg: recvmsg_x takes a batch per system call, waiting (up to SO_RCVTIMEO) only for the
+// first datagram, as MSG_WAITFORONE does. Should it be unavailable, one recv per datagram: the
+// first waits, the rest take only what is already queued. Drops are not reported (no
+// SO_RXQ_OVFL); they still show as lost slices.
 void Ingest::work(Worker &w)
 {
+    // Without a QoS class macOS may keep this thread on an efficiency core, where it cannot keep
+    // up with 10 GbE; user-interactive asks for the performance cores.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    bool batch = true;
+    msghdr_x msgs[kBatch];
+    iovec iov[kBatch];
     while (!stopping_.load(std::memory_order_relaxed)) {
-        ssize_t lens[kBatch];
+        size_t lens[kBatch];
         unsigned n = 0;
-        while (n < kBatch) {
-            ssize_t r = recv(w.fd, &w.buffers[n * kDatagram], kDatagram, n ? MSG_DONTWAIT : 0);
-            if (r < 0) break;
-            lens[n++] = r;
+        if (batch) {
+            for (unsigned k = 0; k < kBatch; ++k) {
+                iov[k] = {&w.buffers[k * kDatagram], kDatagram};
+                msgs[k] = msghdr_x{};
+                msgs[k].msg_iov = &iov[k];
+                msgs[k].msg_iovlen = 1;
+            }
+            ssize_t r = recvmsg_x(w.fd, msgs, kBatch, 0);
+            if (r < 0 && (errno == ENOSYS || errno == EOPNOTSUPP)) {
+                batch = false;
+                continue;
+            }
+            for (ssize_t k = 0; k < r; ++k) lens[n++] = msgs[k].msg_datalen;
+        } else {
+            while (n < kBatch) {
+                ssize_t r = recv(w.fd, &w.buffers[n * kDatagram], kDatagram, n ? MSG_DONTWAIT : 0);
+                if (r < 0) break;
+                lens[n++] = size_t(r);
+            }
         }
         if (!n) continue;
         uint64_t t = now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
         bool fresh = previous && int64_t(t - previous) > int64_t(kRunGapNs);
         for (unsigned k = 0; k < n; ++k)
-            take(w, &w.buffers[k * kDatagram], size_t(lens[k]), fresh && k == 0, t);
+            take(w, &w.buffers[k * kDatagram], lens[k], fresh && k == 0, t);
     }
 }
 #else
