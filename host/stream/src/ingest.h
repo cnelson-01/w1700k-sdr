@@ -44,8 +44,9 @@ private:
     std::unique_ptr<std::atomic<uint64_t>[]> tags_;
 };
 
-// Receives the stream on IP:PORT with several threads (SO_REUSEPORT; the unit cycles its source
-// port so the flows spread over them) and files every completion into the ring by its sequence
+// Receives the stream on IP:PORT (or PORT..PORT+N-1, one socket each, when the unit cycles its
+// destination port) with several threads (SO_REUSEPORT; the unit cycles its source port so the
+// flows spread over them) and files every completion into the ring by its sequence
 // number. A run starts with the first completion after a second of silence, after a jump in
 // sequence, or after restart_run().
 class Ingest {
@@ -72,7 +73,8 @@ public:
         uint64_t run = 0, newest = 0;
     };
 
-    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads);
+    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads,
+           unsigned ports = 1);
     ~Ingest();
     Ingest(const Ingest &) = delete;
     Ingest &operator=(const Ingest &) = delete;
@@ -92,7 +94,7 @@ private:
 
     SampleRing &ring_;
     const std::string bind_ip_;
-    const unsigned port_, threads_;
+    const unsigned port_, threads_, ports_;
     std::atomic<bool> stopping_{false};
     std::vector<std::unique_ptr<Worker>> workers_;
 

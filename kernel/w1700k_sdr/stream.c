@@ -3,7 +3,7 @@
  * mt7996-stream DEVICE --seconds S [--idle-ms N] [--go ADDR VALUE]
  *               [--stop ADDR VALUE] [--threads N] [--touch]
  *               [--data BYTES FILE] [--wrap] [--meta FILE] [--snap SLICES FILE]
- *               [--export IF SRC_IP DST_IP DST_MAC PORT] [--ports N]
+ *               [--export IF SRC_IP DST_IP DST_MAC PORT] [--ports N] [--dst-ports N]
  *               [--drain-ms N] [--export-cpu N] [--cpu N]
  *
  * One stream through the 1 GiB stream ring. The main thread runs the driver's
@@ -23,7 +23,8 @@
  * behind the newest) to FILE and writes FILE.json {seq, chunk, slices, taken}.
  *
  * --export sends every slice as UDP from IF (see the uapi header); --ports
- * cycles the source port over N values from PORT, --drain-ms lets the export
+ * cycles the source port over N values from PORT, --dst-ports the destination
+ * port likewise (for hosts that cannot spread one port), --drain-ms lets the export
  * catch up after pumping, --export-cpu pins the export thread.
  *
  * Prints one `stream` JSON line.
@@ -68,7 +69,7 @@ static int usage(void)
 		"usage: mt7996-stream DEVICE --seconds S [--idle-ms N] [--go ADDR VALUE]\n"
 		"       [--stop ADDR VALUE] [--threads N] [--touch] [--data BYTES FILE] [--wrap]\n"
 		"       [--meta FILE] [--snap SLICES FILE] [--export IF SRC_IP DST_IP DST_MAC PORT]\n"
-		"       [--ports N] [--drain-ms N] [--export-cpu N] [--cpu N]\n");
+		"       [--ports N] [--dst-ports N] [--drain-ms N] [--export-cpu N] [--cpu N]\n");
 	return 2;
 }
 
@@ -273,6 +274,11 @@ static int parse(int argc, char **argv, struct options *o)
 			if (client_u32(argv[++i], &value) || !value || value > 256)
 				return -1;
 			req->export.src_ports = (uint16_t)value;
+			o->export_set = 1;
+		} else if (!strcmp(a, "--dst-ports") && left >= 1) {
+			if (client_u32(argv[++i], &value) || !value || value > 256)
+				return -1;
+			req->export.dst_ports = (uint16_t)value;
 			o->export_set = 1;
 		} else if (!strcmp(a, "--drain-ms") && left >= 1) {
 			if (client_u32(argv[++i], &req->export.drain_ms))

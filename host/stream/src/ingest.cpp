@@ -120,8 +120,9 @@ struct Ingest::Worker {
         duplicates{0}, drops{0}, before{0}, spare{0}, stale{0}, stale_lines{0};
 };
 
-Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads)
-    : ring_(ring), bind_ip_(bind_ip), port_(port), threads_(threads)
+Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads,
+               unsigned ports)
+    : ring_(ring), bind_ip_(bind_ip), port_(port), threads_(threads), ports_(ports ? ports : 1)
 {
     in_addr check;
     if (inet_pton(AF_INET, bind_ip.c_str(), &check) != 1) throw std::runtime_error("not an IPv4 address: " + bind_ip);
@@ -138,11 +139,14 @@ void Ingest::start()
     inet_pton(AF_INET, bind_ip_.c_str(), &address.sin_addr);
     for (unsigned i = 0; i < threads_; ++i) {
         auto w = std::make_unique<Worker>();
+        // Thread i reads port PORT + i % ports: with several destination ports, one socket each.
+        const unsigned port = port_ + i % ports_;
+        address.sin_port = htons(uint16_t(port));
 #ifdef __APPLE__
-        // macOS gives each datagram to one of the SO_REUSEPORT sockets only, so the other
-        // threads would sit idle: they all read the first socket instead.
-        if (i) {
-            w->fd = dup(workers_[0]->fd);
+        // macOS gives each datagram to one of the SO_REUSEPORT sockets on a port only, so further
+        // threads would sit idle: they read their port's first socket instead.
+        if (i >= ports_) {
+            w->fd = dup(workers_[i % ports_]->fd);
             if (w->fd < 0) throw std::runtime_error(std::string("dup: ") + std::strerror(errno));
             fcntl(w->fd, F_SETFD, FD_CLOEXEC);
             workers_.push_back(std::move(w));
@@ -170,7 +174,7 @@ void Ingest::start()
             bind(w->fd, reinterpret_cast<sockaddr *>(&address), sizeof(address))) {
             std::string why = std::strerror(errno);
             if (w->fd >= 0) close(w->fd);
-            throw std::runtime_error("UDP " + bind_ip_ + ":" + std::to_string(port_) + ": " + why);
+            throw std::runtime_error("UDP " + bind_ip_ + ":" + std::to_string(port) + ": " + why);
         }
         workers_.push_back(std::move(w));
     }

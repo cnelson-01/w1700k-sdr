@@ -73,7 +73,9 @@ int sdr_export_open(struct sdr_export *x, const struct w1700k_sdr_stream_export 
 	memset(x, 0, sizeof(*x));
 	if (!cfg->ifindex)
 		return 0;
-	if (cfg->reserved || !cfg->dst_ip || !cfg->dst_port ||
+	if (cfg->dst_ports > 256 ||
+	    ntohs(cfg->dst_port) + (cfg->dst_ports ? cfg->dst_ports : 1) - 1 > 0xffff ||
+	    !cfg->dst_ip || !cfg->dst_port ||
 	    !is_valid_ether_addr(cfg->dst_mac) || !pages || !h->slices ||
 	    !h->slice_bytes || h->slice_bytes % PAGE_SIZE ||
 	    h->header_bytes % PAGE_SIZE ||
@@ -150,7 +152,7 @@ static struct sk_buff *sdr_export_skb(struct sdr_export *x, u64 seq, u32 len)
 	struct udphdr *uh;
 	struct ethhdr *eth;
 	struct iphdr *iph;
-	u16 udp_len, ports;
+	u16 udp_len, ports, dports, n;
 
 	skb = alloc_skb(room + SDR_EXPORT_HEAD, GFP_KERNEL | __GFP_NOWARN);
 	if (!skb)
@@ -167,10 +169,15 @@ static struct sk_buff *sdr_export_skb(struct sdr_export *x, u64 seq, u32 len)
 	udp_len = sizeof(*uh) + sizeof(*h) + len;
 	uh = skb_push(skb, sizeof(*uh));
 	skb_reset_transport_header(skb);
-	/* Cycling the source port spreads the flow over the receiver's queues. */
+	/* Cycling the source port spreads the flow over the receiver's queues; cycling
+	 * the destination port too spreads it over sockets, for hosts that give each
+	 * datagram to one SO_REUSEPORT socket only (macOS).
+	 */
 	ports = c->src_ports ? c->src_ports : 1;
-	uh->source = htons(ntohs(c->src_port) + x->port_next++ % ports);
-	uh->dest = c->dst_port;
+	dports = c->dst_ports ? c->dst_ports : 1;
+	n = x->port_next++;
+	uh->source = htons(ntohs(c->src_port) + n % ports);
+	uh->dest = htons(ntohs(c->dst_port) + n % dports);
 	uh->len = htons(udp_len);
 	uh->check = ~csum_tcpudp_magic(c->src_ip, c->dst_ip, udp_len, IPPROTO_UDP, 0);
 	skb->ip_summed = CHECKSUM_PARTIAL;

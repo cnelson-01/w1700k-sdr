@@ -136,8 +136,13 @@ mkdir -p "$LOGS"
 stop_servers
 sleep 0.5
 cpus=$(sysctl -n hw.ncpu)
-# One socket on macOS: two readers measured best (more contend for its lock).
-"$STREAM" --bind "$HOST_IP" --rx-threads 2 --workers $(( cpus > 12 ? 8 : 6 )) >"$LOGS/stream.log" 2>&1 &
+# macOS hands each datagram on a port to one socket: with export.dst_ports N in the config (a
+# unit image that cycles destination ports), one socket and reader per port; with one port, two
+# readers on it measured best (more contend for its lock).
+dst_ports=$("$PYTHON" -c 'import json,sys; print((json.load(open(sys.argv[1])).get("export") or {}).get("dst_ports") or 1)' "$CONFIG" 2>/dev/null || echo 1)
+if [ "$dst_ports" -gt 1 ]; then readers=$dst_ports; else readers=2; fi
+"$STREAM" --bind "$HOST_IP" --dst-ports "$dst_ports" --rx-threads "$readers" \
+    --workers $(( cpus > 12 ? 8 : 6 )) >"$LOGS/stream.log" 2>&1 &
 stream_pid=$!
 for n in $(seq 1 100); do
     grep -q serving "$LOGS/stream.log" 2>/dev/null && break

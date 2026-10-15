@@ -74,6 +74,11 @@ class Pump(unittest.TestCase):
         self.assertIn('--drain-ms 3000', text)
         self.assertIn('--export-cpu 2 --cpu 3', text)
         self.assertNotIn('--pulse', argv, 'our WM runs the producer: no IRQ5 pulse')
+        self.assertNotIn('--dst-ports', argv, 'one destination port unless configured')
+
+    def test_destination_ports(self):
+        argv = stream.stream_argv('/usr/sbin/mt7996-stream', ExportConfig(dst_ports=4), '02:00:00:00:00:02')
+        self.assertIn('--ports 8 --dst-ports 4', ' '.join(argv))
 
 
 class ResultPage(unittest.TestCase):

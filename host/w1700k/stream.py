@@ -93,8 +93,9 @@ def stream_argv(tool, export, dst_mac):
             '--stop', f'{GO_ADDR:#010x}', f'{STOP_MAGIC:#010x}', '--threads', '0',
             '--go', f'{GO_ADDR:#010x}', f'{GO_MAGIC:#010x}'] + [
             '--export', export.interface, export.src_ip, export.dst_ip, dst_mac, str(export.port),
-            '--ports', str(export.ports), '--drain-ms', str(DRAIN_MS),
-            '--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
+            '--ports', str(export.ports)] + (
+            ['--dst-ports', str(export.dst_ports)] if export.dst_ports > 1 else []) + [
+            '--drain-ms', str(DRAIN_MS), '--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
 
 
 class Stream:

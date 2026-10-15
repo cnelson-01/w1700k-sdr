@@ -6,7 +6,7 @@
      "eeprom": "~/.config/w1700k/eeprom.bin",
      "firmware_dir": "<repo>/firmware/build",
      "export": {"interface": "eth1", "src_ip": "10.77.0.1", "dst_ip": "10.77.0.10",
-                "dst_mac": null, "port": 7700, "ports": 8}}
+                "dst_mac": null, "port": 7700, "ports": 8, "dst_ports": 1}}
 
 unit.bin_dir and unit.module point at the installed clients and driver (production rootfs);
 after `w1700k push` set them to /tmp/w1700k and /tmp/w1700k/w1700k_sdr.ko. export.dst_mac null
@@ -47,6 +47,7 @@ class ExportConfig:
     dst_mac: str | None = None
     port: int = 7700
     ports: int = 8
+    dst_ports: int = 1    # destination ports PORT.. the unit cycles over (w1700k-stream --dst-ports)
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,8 @@ def _validate(config):
         raise ConfigError('export.dst_mac: expected xx:xx:xx:xx:xx:xx')
     if not 1 <= export.port <= 65535 - export.ports or not 1 <= export.ports <= 256:
         raise ConfigError('export.port/ports out of range')
+    if not 1 <= export.dst_ports <= 256 or export.port + export.dst_ports - 1 > 65535:
+        raise ConfigError('export.dst_ports out of range')
     if not config.unit.bin_dir.startswith('/') or not config.unit.module.startswith('/'):
         raise ConfigError('unit.bin_dir and unit.module must be absolute unit paths')
 

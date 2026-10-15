@@ -162,7 +162,7 @@ struct w1700k_sdr_stream_export {
 	__u16 src_ports;	/* source port cycles over this many (0 = 1) */
 	__u8 dst_mac[6];
 	__u16 cpu;		/* export thread CPU + 1; 0 = any */
-	__u16 reserved;
+	__u16 dst_ports;	/* destination port cycles over this many (0 = 1) */
 	__u32 drain_ms;		/* after pumping, time allowed to send the rest */
 };
 

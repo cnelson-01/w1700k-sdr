@@ -43,12 +43,25 @@ def build_problem():
     return "FFTW3 headers missing" if probe.returncode else None
 
 
-def free_udp_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+def free_udp_port(count=1):
+    """The first of `count` consecutive free UDP ports."""
+    while True:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        if port + count - 1 > 65535:
+            continue
+        try:
+            for p in range(port + 1, port + count):
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    probe.bind(("127.0.0.1", p))
+                finally:
+                    probe.close()
+        except OSError:
+            continue
+        return port
 
 
 def word(i, q):
@@ -90,6 +103,7 @@ def tone_amplitude(samples, cycles):
 @unittest.skipIf(build_problem(), build_problem())
 class StreamServiceTest(unittest.TestCase):
     counter = 0
+    dst_ports = 1   # the unit's export.dst_ports: slice `seq` arrives on PORT + seq % dst_ports
 
     @classmethod
     def setUpClass(cls):
@@ -100,9 +114,10 @@ class StreamServiceTest(unittest.TestCase):
     def setUp(self):
         StreamServiceTest.counter += 1
         self.name = "/w1700k-test-%d-%d" % (os.getpid(), self.counter)
-        self.port = free_udp_port()
+        self.port = free_udp_port(self.dst_ports)
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
-                                      "--ring-mib", "16", "--workers", "2", "--rx-threads", "2"],
+                                      "--ring-mib", "16", "--workers", "2", "--rx-threads", "2",
+                                      "--dst-ports", str(self.dst_ports)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
         while True:
@@ -125,7 +140,8 @@ class StreamServiceTest(unittest.TestCase):
         self.assertFalse(stream_shm.exists(self.name), "the object is unlinked at exit")
 
     def send(self, seq, payload):
-        self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
+        self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload,
+                         ("127.0.0.1", self.port + seq % self.dst_ports))
 
     def send_words(self, seq, words):
         self.send(seq, struct.pack("<%dI" % len(words), *words))
@@ -231,6 +247,12 @@ class StreamServiceTest(unittest.TestCase):
         run2 = self.wait_newest(40)
         self.assertEqual(run2, run + 1)
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
+
+
+
+class MultiPortStreamTest(StreamServiceTest):
+    """The same, with the unit cycling the destination port over three ports."""
+    dst_ports = 3
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ void usage()
                  "usage: w1700k-stream [options]\n"
                  "  --bind IP         the stream's destination address on this host (default 10.77.0.10)\n"
                  "  --port N          its UDP port (default 7700)\n"
+                 "  --dst-ports N     listen on PORT..PORT+N-1, a socket each: the unit's export.dst_ports (default 1)\n"
                  "  --rx-threads N    UDP sockets and receive threads (default 8)\n"
                  "  --workers N       unpacking and correction threads (default 6)\n"
                  "  --ring-mib N      the shared sample ring, a power of two (default 512: 0.42 s at 320 Msps)\n"
@@ -53,7 +54,7 @@ unsigned positive(const std::string &option, const std::string &text, unsigned l
 int main(int argc, char **argv)
 {
     std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME;
-    unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, report = 0;
+    unsigned port = 7700, dst_ports = 1, rx_threads = 8, workers = 6, ring_mib = 512, report = 0;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -63,6 +64,7 @@ int main(int argc, char **argv)
             };
             if (arg == "--bind") bind = value();
             else if (arg == "--port") port = positive(arg, value(), 65535);
+            else if (arg == "--dst-ports") dst_ports = positive(arg, value(), 256);
             else if (arg == "--rx-threads") rx_threads = positive(arg, value(), 64);
             else if (arg == "--workers") workers = positive(arg, value(), 64);
             else if (arg == "--ring-mib") ring_mib = positive(arg, value(), 1u << 16);
@@ -76,6 +78,8 @@ int main(int argc, char **argv)
             }
         }
         if (ring_mib & (ring_mib - 1)) throw std::runtime_error("--ring-mib must be a power of two");
+        if (port + dst_ports - 1 > 65535) throw std::runtime_error("--port plus --dst-ports passes 65535");
+        if (rx_threads < dst_ports) rx_threads = dst_ports;  // at least one reader per port
     } catch (const std::exception &e) {
         std::fprintf(stderr, "w1700k-stream: %s\n", e.what());
         usage();
@@ -87,7 +91,7 @@ int main(int argc, char **argv)
     try {
         SharedRing shared(name, ring_mib * 128);
         SampleRing received(kReceiveSlices);
-        Ingest ingest(received, bind, port, rx_threads);
+        Ingest ingest(received, bind, port, rx_threads, dst_ports);
         Publisher publisher(received, ingest, shared.header(), workers);
         publisher.start();
         ingest.start();
