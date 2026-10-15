@@ -118,10 +118,11 @@ if [ "$(media)" != 10Gbase-T ]; then
 fi
 [ "$(media)" = 10Gbase-T ] || warn "link is $(media): above 40 Msps the stream will not fit"
 say "link: $(media)"
-if ping -c1 -t2 -D -s 8972 "$UNIT_IP" >/dev/null 2>&1; then
+# macOS caps a ping at net.inet.raw.maxdgram (8192 bytes); 8100 still needs jumbo frames.
+if ping -c1 -t2 -D -s 8100 "$UNIT_IP" >/dev/null 2>&1; then
     say "jumbo frames: ok"
 else
-    warn "a 9000-byte ping did not pass: check the MTU on both ends"
+    warn "an 8100-byte unfragmented ping did not pass: check the MTU on both ends"
 fi
 
 [ "${1:-}" = --check ] && exit 0
