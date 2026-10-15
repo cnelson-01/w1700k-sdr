@@ -65,14 +65,18 @@ needs_sudo=0
 ifconfig "$iface" | grep -q "mtu $MTU" || needs_sudo=1
 ifconfig "$iface" | grep -q "inet $HOST_IP " || needs_sudo=1
 [ "$(sysctl -n kern.ipc.maxsockbuf)" -gt 8388608 ] || needs_sudo=1
+[ "$(sysctl -n net.link.generic.system.rcvq_maxlen)" -ge 8192 ] || needs_sudo=1
 if [ $needs_sudo = 1 ]; then
-    say "host settings need sudo (MTU $MTU, $HOST_IP on $iface, socket-buffer ceiling)"
+    say "host settings need sudo (MTU $MTU, $HOST_IP on $iface, socket-buffer ceiling, input queue)"
     sudo -v
     ifconfig "$iface" | grep -q "mtu $MTU" || sudo ifconfig "$iface" mtu "$MTU"
     ifconfig "$iface" | grep -q "inet $HOST_IP " ||
         sudo ifconfig "$iface" inet "$HOST_IP" netmask 255.255.255.0 alias
     # The kernel refuses values above its own ceiling ("Result too large"): take the largest it
     # accepts. w1700k-stream then steps its 48 MiB request down to what fits.
+    # The interface's input queue (256 packets by default) overflows at 156k datagrams/s.
+    [ "$(sysctl -n net.link.generic.system.rcvq_maxlen)" -ge 8192 ] ||
+        sudo sysctl -w net.link.generic.system.rcvq_maxlen=8192 >/dev/null
     if [ "$(sysctl -n kern.ipc.maxsockbuf)" -le 8388608 ]; then
         for size in 67108864 50331648 33554432 25165824 16777216 12582912; do
             sudo sysctl -w kern.ipc.maxsockbuf=$size >/dev/null 2>&1 && break
