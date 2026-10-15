@@ -40,6 +40,27 @@ def local_interface(address):
     return None
 
 
+def listen_address(address):
+    """The address the TFTP servers bind. macOS drops an interface's addresses while its
+    link is down (the unit is powered off until the run asks for it), so there the servers
+    listen on every address as long as `address` is set in a network service."""
+    if sys.platform == 'darwin' and local_interface(address) is None and saved_in_network_settings(address):
+        return '0.0.0.0'
+    return address
+
+
+def saved_in_network_settings(address):
+    """macOS: some network service is configured with `address`."""
+    services = subprocess.run(['networksetup', '-listallnetworkservices'], capture_output=True,
+                              text=True).stdout.splitlines()[1:]
+    for service in services:
+        info = subprocess.run(['networksetup', '-getinfo', service.lstrip('*')],
+                              capture_output=True, text=True).stdout
+        if f'IP address: {address}' in info.splitlines():
+            return True
+    return False
+
+
 def port_free(address, port):
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -73,14 +94,15 @@ def preflight(settings, network=True):
     """Check the host before the operator is asked to touch the unit."""
     problems = []
     if network:
-        if local_interface(settings.host_ip) is None:
+        address = listen_address(settings.host_ip)
+        if address == settings.host_ip and local_interface(settings.host_ip) is None:
             problems.append(f'{settings.host_ip} is not configured on any interface '
                             '(see init/README.md, "Host setup")')
         for name, port in (('stock', settings.stock_port),
                            ('transfer', settings.transfer_port)):
-            reason = port_free(settings.host_ip, port)
+            reason = port_free(address, port)
             if reason:
-                problems.append(f'cannot listen on {settings.host_ip}:{port} ({name}): {reason}')
+                problems.append(f'cannot listen on {address}:{port} ({name}): {reason}')
     reason = uart_free(settings.uart)
     if reason:
         problems.append(f'cannot open the console {settings.uart}: {reason}')
@@ -103,10 +125,10 @@ def open_session(settings, tool, write=False, passive=False):
     if not passive:
         servers = [
             # Stock's budget-limited TFTP client needs a fast, retransmitting server.
-            tftp.ServerThread(served, settings.host_ip, settings.stock_port,
+            tftp.ServerThread(served, listen_address(settings.host_ip), settings.stock_port,
                               timeout=1.0, retries=30, priority=True, name='tftp-stock',
                               log=lambda line: log.event('tftp', line=line)),
-            tftp.ServerThread(served, settings.host_ip, settings.transfer_port,
+            tftp.ServerThread(served, listen_address(settings.host_ip), settings.transfer_port,
                               allow_write=True, timeout=5.0, retries=5,
                               name='tftp-transfer',
                               log=lambda line: log.event('tftp', line=line)),
