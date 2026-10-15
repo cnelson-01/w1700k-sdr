@@ -33,6 +33,7 @@ import partitions
 LINUX_SRC = SRC / 'linux'
 FIRMWARE_DIR = BUILD / 'linux-firmware'
 PHY_FIRMWARE = FIRMWARE_DIR / 'rtl8261n.bin'
+PHY_FIRMWARE_C = FIRMWARE_DIR / 'rtl_nic/rtl8261c.bin'
 LOG = LOGS / 'linux.log'
 # OpenWrt's kernel patch series, applied in this order before ours.
 OPENWRT_PATCH_DIRS = ('target/linux/generic/backport-6.18',
@@ -130,6 +131,25 @@ def phy_firmware(openwrt):
         shutil.copyfile(generated, PHY_FIRMWARE)
 
 
+def phy_firmware_c():
+    """rtl_nic/rtl8261c.bin, for units whose 10 GbE PHYs are the RTL8261C revision.
+
+    The Realtek driver identifies those as "RTL8261CE" and requests this file instead of
+    rtl8261n.bin; without it neither 10 GbE port attaches. From linux-firmware, pinned.
+    """
+    pin = sources()['rtl8261c']
+    if PHY_FIRMWARE_C.is_file() and sha256_file(PHY_FIRMWARE_C) == pin['sha256']:
+        return
+    cache = DOWNLOADS / 'rtl8261c.bin'
+    if not cache.is_file() or sha256_file(cache) != pin['sha256']:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(pin['url'], timeout=60) as response:
+            cache.write_bytes(response.read())
+    require(sha256_file(cache) == pin['sha256'], 'rtl8261c: the download is not the pinned file')
+    PHY_FIRMWARE_C.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cache, PHY_FIRMWARE_C)
+
+
 def kernel_make(*targets):
     run(['make', '-C', LINUX_SRC, f'O={LINUX_OUT}', 'ARCH=arm64',
          f'CROSS_COMPILE={CROSS_COMPILE}', f'-j{jobs()}', *targets],
@@ -170,6 +190,7 @@ def main():
             'no cross compiler; run platform/rootfs/build.py toolchain first')
     openwrt = prepare_source()
     phy_firmware(openwrt)
+    phy_firmware_c()
     configure()
     kernel_make('Image', 'modules')
     device_tree(openwrt)
