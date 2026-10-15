@@ -1,0 +1,161 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# macOS: bring up the link to an installed unit and open the spectrum UI.
+#
+#   host/bin/w1700k-mac            set up the link, start w1700k-stream and w1700k-spectrum,
+#                                  open the page; Ctrl-C stops both
+#   host/bin/w1700k-mac --check    set up and check the link only
+#   host/bin/w1700k-mac --stop     stop the stream and spectrum servers
+#
+# One cable from the host's 10 GbE port to the unit's wan port carries both the IQ stream and
+# the controller's ssh (~/.config/w1700k/config.json: unit.host 10.77.0.1). The first run
+# asks for sudo once: jumbo frames, the stream address and a larger socket-buffer ceiling.
+# Environment: W1700K_IFACE (default: the interface whose MAC is export.dst_mac in the
+# config, else the first Aquantia 10 GbE port), W1700K_LISTEN (default 127.0.0.1:8073).
+set -euo pipefail
+
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+CONFIG=${W1700K_CONFIG:-$HOME/.config/w1700k/config.json}
+LOGS=$HOME/.local/share/w1700k/mac-logs
+HOST_IP=10.77.0.10
+UNIT_IP=10.77.0.1
+MTU=9216
+LISTEN=${W1700K_LISTEN:-127.0.0.1:8073}
+STREAM=$REPO/host/stream/build/w1700k-stream
+SPECTRUM=$REPO/host/spectrum/build/w1700k-spectrum
+PYTHON=$REPO/.venv/bin/python
+[ -x "$PYTHON" ] || PYTHON=python3
+
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+warn() { printf '\033[33mwarning: %s\033[0m\n' "$*" >&2; }
+die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+
+stop_servers() {
+    pkill -f "$SPECTRUM" 2>/dev/null || true
+    pkill -f "$STREAM" 2>/dev/null || true
+}
+
+if [ "${1:-}" = --stop ]; then
+    stop_servers
+    say "stopped"
+    exit 0
+fi
+
+[ -x "$STREAM" ] && [ -x "$SPECTRUM" ] || die "host programs not built: run make host in $REPO"
+
+# ---- the interface ---------------------------------------------------------------------------
+iface=${W1700K_IFACE:-}
+if [ -z "$iface" ] && [ -f "$CONFIG" ]; then
+    mac=$("$PYTHON" -c 'import json,sys; print((json.load(open(sys.argv[1])).get("export") or {}).get("dst_mac") or "")' "$CONFIG")
+    if [ -n "$mac" ]; then
+        for i in $(ifconfig -l); do
+            ifconfig "$i" 2>/dev/null | grep -qi "ether $mac" && { iface=$i; break; }
+        done
+    fi
+fi
+if [ -z "$iface" ]; then
+    iface=$(system_profiler SPEthernetDataType 2>/dev/null | awk '/Aquantia/ {a=1} a && /BSD Device Name/ {print $4; exit}')
+fi
+[ -n "$iface" ] || die "no 10 GbE interface found; is the adapter connected? (or set W1700K_IFACE)"
+ifconfig "$iface" >/dev/null 2>&1 || die "$iface does not exist; is the adapter connected?"
+say "interface: $iface"
+
+# ---- host settings (sudo) ---------------------------------------------------------------------
+needs_sudo=0
+ifconfig "$iface" | grep -q "mtu $MTU" || needs_sudo=1
+ifconfig "$iface" | grep -q "inet $HOST_IP " || needs_sudo=1
+[ "$(sysctl -n kern.ipc.maxsockbuf)" -gt 8388608 ] || needs_sudo=1
+if [ $needs_sudo = 1 ]; then
+    say "host settings need sudo (MTU $MTU, $HOST_IP on $iface, socket-buffer ceiling)"
+    sudo -v
+    ifconfig "$iface" | grep -q "mtu $MTU" || sudo ifconfig "$iface" mtu "$MTU"
+    ifconfig "$iface" | grep -q "inet $HOST_IP " ||
+        sudo ifconfig "$iface" inet "$HOST_IP" netmask 255.255.255.0 alias
+    # The kernel refuses values above its own ceiling ("Result too large"): take the largest it
+    # accepts. w1700k-stream then steps its 48 MiB request down to what fits.
+    if [ "$(sysctl -n kern.ipc.maxsockbuf)" -le 8388608 ]; then
+        for size in 67108864 50331648 33554432 25165824 16777216 12582912; do
+            sudo sysctl -w kern.ipc.maxsockbuf=$size >/dev/null 2>&1 && break
+        done
+    fi
+fi
+say "MTU $(ifconfig "$iface" | sed -n 's/.*mtu \([0-9]*\).*/\1/p'), socket-buffer ceiling $(( $(sysctl -n kern.ipc.maxsockbuf) / 1048576 )) MiB"
+[ "$(sysctl -n kern.ipc.maxsockbuf)" -gt 8388608 ] ||
+    warn "socket-buffer ceiling still 8 MiB: 320 Msps may lose slices"
+
+# ---- the link ---------------------------------------------------------------------------------
+media() { ifconfig "$iface" | sed -n 's/.*media: autoselect (\([^ ]*\).*/\1/p'; }
+for n in $(seq 1 60); do
+    ifconfig "$iface" | grep -q 'status: active' && break
+    [ "$n" = 1 ] && say "waiting for a link on $iface (cable on the unit's wan port, unit powered)"
+    sleep 1
+done
+ifconfig "$iface" | grep -q 'status: active' || die "no link on $iface"
+# macOS drops addresses it did not configure when the link goes down: put it back if needed.
+ifconfig "$iface" | grep -q "inet $HOST_IP " || {
+    sudo ifconfig "$iface" inet "$HOST_IP" netmask 255.255.255.0 alias
+}
+for n in $(seq 1 60); do
+    ping -c1 -t1 "$UNIT_IP" >/dev/null 2>&1 && break
+    [ "$n" = 1 ] && say "waiting for the unit at $UNIT_IP"
+done
+ping -c1 -t2 "$UNIT_IP" >/dev/null 2>&1 || die "the unit does not answer at $UNIT_IP"
+
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=8)
+known=$("$PYTHON" -c 'import json,sys; print((json.load(open(sys.argv[1])).get("unit") or {}).get("known_hosts") or "")' "$CONFIG" 2>/dev/null || true)
+[ -n "$known" ] && SSH+=(-o "UserKnownHostsFile=$known")
+
+# The unit's RTL8261C sometimes settles at 1 Gb/s after a boot; renegotiating brings 10 Gb/s.
+if [ "$(media)" != 10Gbase-T ]; then
+    warn "link is $(media), not 10Gbase-T: renegotiating from the unit"
+    "${SSH[@]}" "root@$UNIT_IP" 'nohup sh -c "ip link set eth1 down; sleep 3; ip link set eth1 up" >/dev/null 2>&1 &' ||
+        warn "could not reach the unit over ssh to renegotiate"
+    sleep 5
+    for n in $(seq 1 30); do [ "$(media)" = 10Gbase-T ] && break; sleep 1; done
+    ifconfig "$iface" | grep -q "inet $HOST_IP " ||
+        sudo ifconfig "$iface" inet "$HOST_IP" netmask 255.255.255.0 alias
+    for n in $(seq 1 30); do ping -c1 -t1 "$UNIT_IP" >/dev/null 2>&1 && break; done
+fi
+[ "$(media)" = 10Gbase-T ] || warn "link is $(media): above 40 Msps the stream will not fit"
+say "link: $(media)"
+if ping -c1 -t2 -D -s 8972 "$UNIT_IP" >/dev/null 2>&1; then
+    say "jumbo frames: ok"
+else
+    warn "a 9000-byte ping did not pass: check the MTU on both ends"
+fi
+
+[ "${1:-}" = --check ] && exit 0
+
+# ---- the servers ------------------------------------------------------------------------------
+mkdir -p "$LOGS"
+stop_servers
+sleep 0.5
+cpus=$(sysctl -n hw.ncpu)
+"$STREAM" --bind "$HOST_IP" --workers $(( cpus > 12 ? 8 : 6 )) >"$LOGS/stream.log" 2>&1 &
+stream_pid=$!
+for n in $(seq 1 100); do
+    grep -q serving "$LOGS/stream.log" 2>/dev/null && break
+    kill -0 $stream_pid 2>/dev/null || die "w1700k-stream exited: $(cat "$LOGS/stream.log")"
+    sleep 0.1
+done
+say "$(cat "$LOGS/stream.log")"
+
+cleanup() {
+    trap - INT TERM EXIT
+    say "stopping"
+    kill "${spectrum_pid:-}" 2>/dev/null || true
+    wait "${spectrum_pid:-}" 2>/dev/null || true
+    kill $stream_pid 2>/dev/null || true
+    wait $stream_pid 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
+"$SPECTRUM" --listen "$LISTEN" --fft-threads $(( cpus > 12 ? 10 : 4 )) \
+    --controller "exec '$PYTHON' '$REPO/host/bin/w1700k' serve" &
+spectrum_pid=$!
+sleep 1
+kill -0 $spectrum_pid 2>/dev/null || die "w1700k-spectrum did not start"
+say "spectrum UI: http://$LISTEN/  (press ▶ to start; Ctrl-C here stops everything)"
+say "logs: $LOGS"
+open "http://$LISTEN/" 2>/dev/null || true
+wait $spectrum_pid

@@ -9,6 +9,7 @@ import io
 import os
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -40,7 +41,9 @@ def _control_dir():
     base = os.environ.get('XDG_RUNTIME_DIR')
     if base and Path(base).is_dir():
         return Path(base)
-    path = Path(tempfile.gettempdir()) / f'w1700k-{os.getuid()}'
+    # macOS's per-user temporary directory is too deep for a Unix socket path (104 bytes).
+    temporary = '/tmp' if sys.platform == 'darwin' else tempfile.gettempdir()
+    path = Path(temporary) / f'w1700k-{os.getuid()}'
     path.mkdir(mode=0o700, exist_ok=True)
     return path
 
