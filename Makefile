@@ -12,7 +12,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: all toolchain linux sdr rootfs loader dumper images firmware host check \
+.PHONY: all toolchain linux sdr rootfs loader dumper images firmware host gnuradio check-gnuradio check \
 	clean distclean
 
 all: images dumper firmware host
@@ -58,6 +58,14 @@ host:
 check:
 	$(PYTHON) tools/check_hw_names.py
 	$(PYTHON) -m unittest discover -s tests
+
+# Optional GNU Radio 3.10 module (not required for the receiver/web UI).
+gnuradio:
+	cmake -S host/gr-w1700k -B host/gr-w1700k/build -DCMAKE_BUILD_TYPE=Release
+	cmake --build host/gr-w1700k/build --parallel
+
+check-gnuradio: gnuradio
+	ctest --test-dir host/gr-w1700k/build --output-on-failure
 
 # Remove build outputs but keep downloads and prepared sources.
 clean:

@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: MIT
+id: w1700k_source
+label: W1700K Source
+category: '[W1700K]'
+flags: [python, throttle]
+
+parameters:
+- id: stream_name
+  label: Shared memory name
+  dtype: string
+  default: /w1700k-stream
+- id: controller
+  label: Controller command (empty = passive)
+  dtype: string
+  default: ''
+- id: band
+  label: RF band
+  dtype: enum
+  default: '1'
+  options: ['0', '1', '2']
+  option_labels: ['2.4 GHz (MT7976)', '5 GHz (MT7977)', '6 GHz (MT7977)']
+- id: sample_rate
+  label: Sample rate (S/s)
+  dtype: real
+  default: 40e6
+- id: center_freq
+  label: Center frequency (Hz)
+  dtype: real
+  default: 5250e6
+- id: capture_rate
+  label: Capture rate (0 = sample rate)
+  dtype: real
+  default: '0'
+  hide: part
+- id: agc
+  label: AGC
+  dtype: bool
+  default: 'True'
+- id: lna
+  label: Manual LNA index (0..4)
+  dtype: int
+  default: '2'
+  hide: ${ 'part' if agc else 'none' }
+- id: lpf
+  label: Manual baseband gain index (0..9)
+  dtype: int
+  default: '9'
+  hide: ${ 'part' if agc else 'none' }
+- id: filter_mhz
+  label: Analog filter (MHz)
+  dtype: int
+  default: '40'
+- id: flatten
+  label: Correct decimation roll-off (shared)
+  dtype: bool
+  default: 'False'
+- id: command_timeout
+  label: Controller timeout (s)
+  dtype: real
+  default: '60'
+  hide: part
+
+outputs:
+- domain: stream
+  dtype: complex
+
+templates:
+  imports: from gnuradio import w1700k
+  make: |-
+    w1700k.source(stream_name=${stream_name}, controller=${controller}, band=${band},
+                  sample_rate=${sample_rate}, center_freq=${center_freq}, capture_rate=${capture_rate},
+                  agc=${agc}, lna=${lna}, lpf=${lpf}, filter_mhz=${filter_mhz},
+                  flatten=${flatten}, command_timeout=${command_timeout})
+  callbacks:
+  - set_center_freq(${center_freq})
+  - set_gain(${agc}, ${lna}, ${lpf})
+  - set_filter(${filter_mhz})
+  - set_flatten(${flatten})
+
+asserts:
+- ${ sample_rate in (40e6, 80e6, 160e6, 320e6) }
+- ${ capture_rate in (0, sample_rate) or (band == '2' and sample_rate == 320e6 and capture_rate == 640e6) }
+- ${ center_freq > 0 }
+- ${ filter_mhz in (20, 40, 80, 160, 320) }
+- ${ 0 <= lna <= 4 and 0 <= lpf <= 9 }
+
+documentation: |-
+  Start w1700k-stream on this host first. Output is complex float, I+jQ,
+  divided by 8192. Corrected samples may exceed +/-1. Do not add a Throttle.
+
+  Empty controller: attach to an existing stream without controlling hardware.
+  Rate/frequency then only label samples: set them to match the actual receiver.
+  Other RF controls have no effect in passive mode.
+
+  Managed example: /absolute/path/to/host/bin/w1700k serve
+  The flowgraph loads/configures/starts a stopped radio and stops it on shutdown.
+  A radio already streaming is refused. Use one controller per unit. Configuration
+  comes from w1700k's usual config file, or add --config PATH before serve.
+
+  Band, sample rate and capture rate require rebuilding the flowgraph. Center
+  frequency, gain, filter and flatten can change while running. Gain controls
+  are hardware indices, not dB. Flatten affects all shared-ring consumers.
+
+  Lost slices become zeros with w1700k_gap tags. Overruns skip to live data,
+  tagged with an unknown sample count. w1700k_run marks run boundaries;
+  w1700k_flattened describes actual correction state. rx_rate/rx_freq are
+  informational; there is no hardware timestamp or sample-exact retune tag.
+  A dead stream service ends this source. Restart the service and flowgraph.
+
+file_format: 1
